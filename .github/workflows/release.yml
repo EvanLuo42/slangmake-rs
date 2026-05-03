@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "slangmake-sys-v*"
+      - "slangmake-v*"
+
+permissions:
+  contents: write   # for the GitHub release
+
+env:
+  CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  # If ci.yml already completed successfully on this exact commit (typically
+  # because the same SHA was already pushed to main and CI ran there), skip
+  # re-running it. Otherwise the `ci` job below kicks it off.
+  guard:
+    name: Check whether CI already passed on this commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      should_skip: ${{ steps.check.outputs.should_skip }}
+    steps:
+      - name: Look up successful ci.yml runs at this SHA
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}" \
+            --jq '[.workflow_runs[] | select(.conclusion=="success")] | length')
+          if [ "$count" -gt 0 ]; then
+            echo "should_skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::ci.yml already passed on ${{ github.sha }} ($count run(s)); skipping re-run"
+          else
+            echo "should_skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Run the full CI suite (fmt + clippy + check matrix + test) on the tagged
+  # commit when the guard didn't find a green run already.
+  ci:
+    needs: guard
+    if: needs.guard.outputs.should_skip != 'true'
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  publish:
+    name: Publish to crates.io
+    needs: [guard, ci]
+    # Allow publish when CI was skipped because it was already green; block
+    # only when CI actually ran and failed (or guard itself failed).
+    if: |
+      always() &&
+      needs.guard.result == 'success' &&
+      (needs.ci.result == 'success' || needs.ci.result == 'skipped')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: slangmake-rs
+
+      # Parse tag like "slangmake-v0.1.0" or "slangmake-sys-v0.4.1"
+      # into CRATE=slangmake / VERSION=0.1.0 (etc.).
+      - name: Parse tag
+        id: tag
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          if [[ "$tag" =~ ^(slangmake-sys|slangmake)-v(.+)$ ]]; then
+            crate="${BASH_REMATCH[1]}"
+            version="${BASH_REMATCH[2]}"
+          else
+            echo "tag '$tag' does not match expected pattern" >&2
+            exit 1
+          fi
+          echo "crate=$crate"     >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+
+      # Verify the Cargo.toml version actually matches the tag — otherwise
+      # crates.io publish would either fail or silently push the wrong number.
+      - name: Verify Cargo.toml version matches tag
+        shell: bash
+        run: |
+          manifest="crates/${{ steps.tag.outputs.crate }}/Cargo.toml"
+          current=$(grep -m1 '^version = ' "$manifest" | sed -E 's/version = "(.*)"/\1/')
+          expected="${{ steps.tag.outputs.version }}"
+          if [ "$current" != "$expected" ]; then
+            echo "Cargo.toml version ($current) != tag version ($expected)" >&2
+            exit 1
+          fi
+
+      # Publishing `slangmake` requires the matching `slangmake-sys` version
+      # to already be on crates.io (cargo resolves deps from the registry
+      # during `publish`, ignoring `path =`). Fail fast with a clear message
+      # rather than letting `cargo publish` complain cryptically.
+      - name: Verify slangmake-sys is on crates.io (when publishing wrapper)
+        if: steps.tag.outputs.crate == 'slangmake'
+        shell: bash
+        run: |
+          sys_version=$(grep -m1 '^version = ' crates/slangmake-sys/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if ! curl -sf "https://crates.io/api/v1/crates/slangmake-sys/${sys_version}" >/dev/null; then
+            echo "slangmake-sys ${sys_version} is not yet on crates.io." >&2
+            echo "Tag and publish slangmake-sys-v${sys_version} first, then re-tag this release." >&2
+            exit 1
+          fi
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ${{ steps.tag.outputs.crate }}
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.crate }} v${{ steps.tag.outputs.version }}" \
+            --generate-notes

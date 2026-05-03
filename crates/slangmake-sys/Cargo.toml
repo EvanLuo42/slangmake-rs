@@ -1,0 +1,40 @@
+[package]
+name = "slangmake-sys"
+version = "0.4.1"
+edition = "2021"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Raw FFI bindings to slangmake (https://github.com/EvanLuo42/slangmake)"
+documentation = "https://docs.rs/slangmake-sys"
+readme = "README.md"
+keywords = ["slang", "shader", "ffi", "bindgen", "graphics"]
+categories = ["external-ffi-bindings", "graphics", "rendering"]
+links = "slangmake"
+build = "build.rs"
+include = [
+    "src/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[features]
+default = ["runtime", "compiler"]
+runtime = []
+compiler = []
+
+[build-dependencies]
+bindgen = "0.72"
+ureq = { version = "3.3", features = ["json", "rustls"], default-features = false }
+serde_json = "1"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+sha2 = "0.11"
+hex = "0.4"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

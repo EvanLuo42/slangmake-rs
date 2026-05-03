@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  # Reusable: release.yml gates publish on this workflow passing.
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: slangmake-rs
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  check:
+    name: check (${{ matrix.features }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: "default"
+            flags: ""
+          - features: "runtime only"
+            flags: "--no-default-features --features runtime"
+          - features: "compiler only"
+            flags: "--no-default-features --features compiler"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: slangmake-rs
+      - run: cargo check -p slangmake-sys ${{ matrix.flags }}
+      - run: cargo check -p slangmake ${{ matrix.flags }}
+
+  test:
+    name: test
+    runs-on: windows-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: slangmake-rs
+      - run: cargo test --workspace --all-features --no-fail-fast
